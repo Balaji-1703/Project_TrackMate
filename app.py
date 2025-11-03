@@ -1,16 +1,9 @@
 import streamlit as st
 import pandas as pd
 import os
+import supabase
 from datetime import datetime, date
-from config import ADMIN_CREDENTIALS
-from events import load_events, add_event
-from user_management import (
-    add_active_user,
-    remove_active_user,
-    cleanup_inactive_users,
-    update_user_activity,
-    load_active_users
-)
+from supabase import create_client, Client
 import time
 
 # Initialize session state
@@ -21,38 +14,174 @@ if 'current_user' not in st.session_state:
 if 'last_cleanup' not in st.session_state:
     st.session_state.last_cleanup = time.time()
 
-# File paths
-DATA_FILE = "attendance.csv"
-STUDENT_INFO_FILE = "student_info.csv"
-EVENTS_FILE = "events.csv"
+# Initialize Supabase client
+supabase: Client = create_client(st.secrets["SUPABASE_CREDENTIALS"]["SUPABASE_URL"], st.secrets["SUPABASE_CREDENTIALS"]["SUPABASE_KEY"])
 
-# Load attendance data
-if os.path.exists(DATA_FILE):
-    df = pd.read_csv(DATA_FILE)
-    if 'date' in df.columns:
-        df['date'] = pd.to_datetime(df['date']).dt.date
-else:
-    df = pd.DataFrame(columns=['name', 'date', 'status'])
+# Replace file loading with Supabase queries
+def load_attendance_data():
+    response = supabase.table('attendance').select('*').execute()
+    if response.data:
+        df = pd.DataFrame(response.data)
+        if 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date']).dt.date
+        return df
+    return pd.DataFrame(columns=['name', 'date', 'status', 'class_type', 'event'])
 
+def load_student_info():
+    response = supabase.table('student_info').select('*').execute()
+    if response.data:
+        return pd.DataFrame(response.data)
+    return pd.DataFrame(columns=['name', 'bio', 'join_date', 'contact'])
 
-# Add at the start of your script, after loading the CSV
-if 'class_type' not in df.columns:
-    df['class_type'] = 'Regular'  # Set default for existing records
-    df.to_csv(DATA_FILE, index=False)
+# Replace the file loading code with Supabase queries
+df = load_attendance_data()
+student_info_df = load_student_info()
 
+def check_existing_attendance(name, date):
+    """Check if attendance already exists for given name and date"""
+    response = supabase.table('attendance')\
+        .select('*')\
+        .eq('name', name)\
+        .eq('date', str(date))\
+        .execute()
+    return len(response.data) > 0
 
-# Load or create student info data
-if os.path.exists(STUDENT_INFO_FILE):
-    student_info_df = pd.read_csv(STUDENT_INFO_FILE)
-else:
-    student_info_df = pd.DataFrame(columns=['name', 'bio', 'join_date', 'contact'])
+def save_attendance(df, is_edit_mode=False):
+    try:
+        if not df.empty:
+            # Create a copy and convert data types
+            df_to_save = df.copy()
+            
+            # Convert date to string
+            if 'date' in df_to_save.columns:
+                df_to_save['date'] = df_to_save['date'].astype(str)
+            
+            # Remove id column if it exists to let Supabase auto-generate it
+            if 'id' in df_to_save.columns:
+                df_to_save = df_to_save.drop('id', axis=1)
+            
+            # Convert numeric columns to appropriate types
+            numeric_columns = df_to_save.select_dtypes(include=['float64', 'int64']).columns
+            for col in numeric_columns:
+                df_to_save[col] = df_to_save[col].fillna(0).astype(int)
+            
+            # Convert DataFrame to records
+            records = df_to_save.to_dict('records')
+            
+            # Process in batches
+            batch_size = 100
+            for i in range(0, len(records), batch_size):
+                batch = records[i:i + batch_size]
+                if is_edit_mode:
+                    # Update existing records
+                    for record in batch:
+                        supabase.table('attendance')\
+                            .update({
+                                'status': record['status'],
+                                'class_type': record['class_type'],
+                                'event': record['event']
+                            })\
+                            .eq('name', record['name'])\
+                            .eq('date', record['date'])\
+                            .execute()
+                else:
+                    # For new records, check existence and insert
+                    filtered_batch = []
+                    for record in batch:
+                        exists = check_existing_attendance(record['name'], record['date'])
+                        if not exists:
+                            filtered_batch.append(record)
+                        else:
+                            st.warning(f"Attendance already marked for {record['name']} on {record['date']}")
+                    
+                    if filtered_batch:
+                        supabase.table('attendance').insert(filtered_batch).execute()
+
+            return True
+    except Exception as e:
+        st.error(f"Error saving attendance data: {str(e)}")
+        st.error("Data types:", df_to_save.dtypes)  # Debug info
+        return False
+
+def save_student_info(df):
+    supabase.table('student_info').delete().neq('id', 0).execute()
+    if not df.empty:
+        records = df.to_dict('records')
+        supabase.table('student_info').insert(records).execute()
+
+def load_active_users():
+    response = supabase.table('active_users').select('username').execute()
+    if response.data:
+        return [user['username'] for user in response.data]
+    return []
+
+# Modify the active users functions
+def add_active_user(username, is_admin=False):
+    timestamp = datetime.now().isoformat()
+    supabase.table('active_users').insert({
+        'username': username,
+        'is_admin': is_admin,
+        'last_active': timestamp
+    }).execute()
+
+def remove_active_user(username):
+    supabase.table('active_users').delete().eq('username', username).execute()
+
+def update_user_activity(username):
+    timestamp = datetime.now().isoformat()
+    supabase.table('active_users').update({
+        'last_active': timestamp
+    }).eq('username', username).execute()
+
+def cleanup_inactive_users():
+    threshold = (datetime.now() - pd.Timedelta(minutes=5)).isoformat()
+    supabase.table('active_users').delete().lt('last_active', threshold).execute()
+
+# Modify event functions
+def load_events():
+    response = supabase.table('events').select('*').execute()
+    if response.data:
+        return pd.DataFrame(response.data)
+    return pd.DataFrame(columns=['event_name', 'start_date', 'end_date', 'description'])
+
+def add_event(name, start, end, desc):
+    supabase.table('events').insert({
+        'event_name': name,
+        'start_date': start.isoformat(),
+        'end_date': end.isoformat(),
+        'description': desc
+    }).execute()
+    return load_events()
 
 # Add after loading other DataFrames
 events_df = load_events()
 
+def verify_member(username, password):
+    try:
+        response = supabase.table('member_credentials')\
+            .select('*')\
+            .eq('username', username)\
+            .eq('password', password)\
+            .execute()
+
+        if len(response.data) == 0:
+            st.error("Invalid member credentials")
+            return False
+        
+        member = response.data[0]
+        if not member['is_active']:
+            st.error("Your account is inactive. Please contact the admin.")
+            return False
+        else:
+            return True
+
+    except Exception as e:
+        st.error(f"Error verifying member: {str(e)}")
+        return False
+
 # Modify the login function
 def login():
-    st.title("Zoho Dance Crew Attendance Register - Login")
+    st.title("Zoho Dance Crew's Attendance Register - Login")
     
     col1, col2 = st.columns([3, 2])
     with col1:
@@ -62,22 +191,24 @@ def login():
             admin_name = st.text_input("Admin Username")
             admin_password = st.text_input("Password", type="password")
             
-            if st.button("Login"):
-                if admin_name in ADMIN_CREDENTIALS and ADMIN_CREDENTIALS[admin_name] == admin_password:
+            if st.button("Login as Admin"):
+                if admin_name == st.secrets["ADMIN_CREDENTIALS"]["username"] and st.secrets["ADMIN_CREDENTIALS"]["password"] == admin_password:
                     st.session_state.is_admin = True
                     st.session_state.current_user = f"admin:{admin_name}"
                     add_active_user(admin_name, is_admin=True)
-                    st.success("Logged in as Admin")
+                    st.success(f"Logged in as Admin: {admin_name}")
                     st.rerun()
                 else:
-                    st.error("Invalid credentials")
+                    st.error("Invalid admin credentials")
         else:
-            viewer_name = st.text_input("Enter your name to view records")
-            if st.button("Enter"):
-                if viewer_name:
-                    st.session_state.current_user = f"viewer:{viewer_name}"
-                    add_active_user(viewer_name)
-                    st.success(f"Welcome, {viewer_name}")
+            member_name = st.text_input("Member Username")
+            member_password = st.text_input("Member Password", type="password")
+
+            if st.button("Login as Member"):
+                if verify_member(member_name, member_password):
+                    st.session_state.current_user = f"viewer:{member_name}"
+                    add_active_user(member_name)
+                    st.success(f"Welcome, {member_name}")
                     st.rerun()
         
 # Replace the viewer display section
@@ -136,9 +267,31 @@ else:
 
 # Rest of your existing code remains the same...
 
+def add_member_credentials(username, password):
+    try:
+        supabase.table('member_credentials').insert({
+            'username': username,
+            'password': password
+        }).execute()
+        return True
+    except Exception as e:
+        st.error(f"Error adding member credentials: {str(e)}")
+        return False
+
+def update_member_status(username, is_active):
+    try:
+        supabase.table('member_credentials')\
+            .update({'is_active': is_active})\
+            .eq('username', username)\
+            .execute()
+        return True
+    except Exception as e:
+        st.error(f"Error updating member status: {str(e)}")
+        return False
+
 # Create tabs based on user role
 if st.session_state.is_admin:
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Mark Attendance", "Mark/Edit Past Attendance", "View Records", "Statistics", "Events"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Mark Attendance", "Mark/Edit Past Attendance", "View Records", "Statistics", "Events", "Manage Members"])
 else:
     tab3, tab4, tab5 = st.tabs(["View Records", "Statistics", "Events"])
 
@@ -148,175 +301,153 @@ today = date.today()
 # Only show attendance marking tabs for admin
 if st.session_state.is_admin:
     with tab1:
-        # Get list of unique names from existing records
-        existing_names = sorted(df['name'].unique()) if not df.empty else []
-    
-        # Add new student option
-        new_name = st.text_input("New to ZDC Fam?! Enroll name")
-        if new_name and new_name not in existing_names:
-            existing_names.append(new_name)
-            st.success(f"Added new ZDC Member: {new_name}")
-
-        # Select single student attendance
-        # st.subheader("Mark Attendance")
-        # student_name = st.selectbox("Select student", existing_names if existing_names else ['No students yet'])
-    
-        # # Mark attendance
-        # status = st.radio("Attendance Status", ['Present', 'Absent'])
-    
-        # if st.button("Mark Attendance"):
-        #     if student_name != 'No students yet':
-        #         # Check if attendance already marked for today
-        #         if not df.empty and len(df[(df['name'] == student_name) & (df['date'] == today)]) > 0:
-        #             st.error(f"Attendance for {student_name} already marked for today!")
-        #         else:
-        #             new_data = {
-        #                 'name': student_name,
-        #                 'date': today,
-        #                 'status': status
-        #             }
-        #             df = pd.concat([df, pd.DataFrame([new_data])], ignore_index=True)
-        #             df.to_csv(DATA_FILE, index=False)
-        #             st.success(f"Attendance marked for {student_name}")
-        #         pass
+        # Get list of members from member_credentials
+        response = supabase.table('member_credentials')\
+            .select('username')\
+            .eq('is_active', True)\
+            .execute()
         
-        # Add a divider
-        st.divider()
+        existing_names = []
+        if response.data:
+            existing_names = sorted([member['username'] for member in response.data])
 
-        # Bulk Attendance Section
-        st.subheader("Bulk Attendance Marking")
-
-        if existing_names:
-             # Date and class type selection
-            col1, col2, col3 = st.columns([2, 1, 1])
-            with col1:
-                bulk_date = st.date_input("Select Date for Bulk Attendance", today, key="bulk_date")
-            with col2:
-                class_type = st.selectbox(
-                    "Class Type",
-                    ["Regular", "Special", "Event/Competition"],
-                    help="Select the type of class",
-                    key="bulk_class_type"  # Add unique key
-                )
-
-            # Show event selection if class type is Event/Competition
-            if class_type == "Event/Competition":
-                st.divider()
-                col1, col2 = st.columns([3, 1])
-                with col1:
-                    # Option to select existing event or create new
-                    existing_events = events_df['event_name'].unique().tolist() if not events_df.empty else []
-                    event_option = st.radio("Event", ["Select Existing", "Create New"], horizontal=True)
-                    
-                    if event_option == "Select Existing":
-                        if existing_events:
-                            selected_event = st.selectbox("Select Event", existing_events)
-                        else:
-                            st.warning("No events found. Create a new event.")
-                            event_option = "Create New"
-                    
-                    if event_option == "Create New":
-                        with st.expander("Add New Event"):
-                            new_event_name = st.text_input("Event Name")
-                            event_start = st.date_input("Start Date")
-                            event_end = st.date_input("End Date")
-                            event_desc = st.text_area("Description")
-                            
-                            if st.button("Add Event"):
-                                if new_event_name and event_start and event_end:
-                                    events_df = add_event(new_event_name, event_start, event_end, event_desc)
-                                    st.success("Event added successfully!")
-                                    selected_event = new_event_name
-                                else:
-                                    st.error("Please fill all required fields")
-
-            # Create two columns for Present/Absent selection
-            col1, col2 = st.columns(2)
-
-            with col1:
-                st.write("Select Present Students")
-                present_students = st.multiselect(
-                    "Present",
-                    options=existing_names,
-                    default=[],
-                    key="present_multiselect"
-                )
-
-            with col2:
-                st.write("Select Absent Students")
-                # Show only students not marked as present
-                absent_options = [name for name in existing_names if name not in present_students]
-                absent_students = st.multiselect(
-                    "Absent",
-                    options=absent_options,
-                    default=[],
-                    key="absent_multiselect"
-                )
-
-            # Bulk mark attendance button
-            if st.button("Mark Bulk Attendance"):
-                if present_students or absent_students:
-                    # Check if any students already have attendance for selected date
-                    existing_records = df[df['date'] == bulk_date]['name'].tolist()
-                    new_records = []
-                    skipped_students = []
-
-                    # Add present students
-                    for student in present_students:
-                        if student not in existing_records:
-                            new_records.append({
-                                'name': student,
-                                'date': bulk_date,
-                                'status': 'Present',
-                                'class_type': class_type,
-                                'event': selected_event if class_type == "Event/Competition" else None
-                            })
-                        else:
-                            skipped_students.append(student)
-
-                    # Add absent students
-                    for student in absent_students:
-                        if student not in existing_records:
-                            new_records.append({
-                                'name': student,
-                                'date': bulk_date,
-                                'status': 'Absent',
-                                'class_type': class_type,
-                                'event': selected_event if class_type == "Event/Competition" else None
-                            })
-                        else:
-                            skipped_students.append(student)
-
-                    if new_records:
-                        df = pd.concat([df, pd.DataFrame(new_records)], ignore_index=True)
-                        df.to_csv(DATA_FILE, index=False)
-                        st.success(f"Bulk attendance marked for {len(new_records)} students on {bulk_date}")
-
-                        # Show summary
-                        st.write("Summary:")
-                        st.write(f"Date: {bulk_date}")
-                        st.write(f"Present: {len([r for r in new_records if r['status'] == 'Present'])} students")
-                        st.write(f"Absent: {len([r for r in new_records if r['status'] == 'Absent'])} students")
-
-                        # Show detailed lists
-                        col3, col4 = st.columns(2)
-                        with col3:
-                            if present_students:
-                                st.write("Present Students:", ", ".join([s for s in present_students if s not in skipped_students]))
-                        with col4:
-                            if absent_students:
-                                st.write("Absent Students:", ", ".join([s for s in absent_students if s not in skipped_students]))
-
-                        # Show skipped students if any
-                        if skipped_students:
-                            st.warning(f"Skipped {len(skipped_students)} students (attendance already marked):")
-                            st.write(", ".join(skipped_students))
-                    else:
-                        st.warning("Attendance already marked for all selected students on this date")
-                else:
-                    st.warning("Please select at least one student")
+        if not existing_names:
+            st.info("No active members found. Please add members in the Manage Members tab.")
         else:
-            st.info("No students available. Please add students first.")
+            # Bulk Attendance Section
+            st.subheader("Bulk Attendance Marking")
+
+            if existing_names:
+                 # Date and class type selection
+                col1, col2, col3 = st.columns([2, 1, 1])
+                with col1:
+                    bulk_date = st.date_input("Select Date for Bulk Attendance", today, key="bulk_date")
+                with col2:
+                    class_type = st.selectbox(
+                        "Class Type",
+                        ["Regular", "Special", "Event/Competition"],
+                        help="Select the type of class",
+                        key="bulk_class_type"  # Add unique key
+                    )
+
+                # Show event selection if class type is Event/Competition
+                if class_type == "Event/Competition":
+                    st.divider()
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        # Option to select existing event or create new
+                        existing_events = events_df['event_name'].unique().tolist() if not events_df.empty else []
+                        event_option = st.radio("Event", ["Select Existing", "Create New"], horizontal=True)
+
+                        if event_option == "Select Existing":
+                            if existing_events:
+                                selected_event = st.selectbox("Select Event", existing_events)
+                            else:
+                                st.warning("No events found. Create a new event.")
+                                event_option = "Create New"
+
+                        if event_option == "Create New":
+                            with st.expander("Add New Event"):
+                                new_event_name = st.text_input("Event Name")
+                                event_start = st.date_input("Start Date")
+                                event_end = st.date_input("End Date")
+                                event_desc = st.text_area("Description")
+
+                                if st.button("Add Event"):
+                                    if new_event_name and event_start and event_end:
+                                        events_df = add_event(new_event_name, event_start, event_end, event_desc)
+                                        st.success("Event added successfully!")
+                                        selected_event = new_event_name
+                                    else:
+                                        st.error("Please fill all required fields")
+
+                # Create two columns for Present/Absent selection
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    st.write("Select Present Students")
+                    present_students = st.multiselect(
+                        "Present",
+                        options=existing_names,
+                        default=[],
+                        key="present_multiselect"
+                    )
+
+                with col2:
+                    st.write("Select Absent Students")
+                    # Show only students not marked as present
+                    absent_options = [name for name in existing_names if name not in present_students]
+                    absent_students = st.multiselect(
+                        "Absent",
+                        options=absent_options,
+                        default=[],
+                        key="absent_multiselect"
+                    )
+
+                # Bulk mark attendance button
+                if st.button("Mark Bulk Attendance"):
+                    if present_students or absent_students:
+                        # Check if any students already have attendance for selected date
+                        existing_records = df[df['date'] == bulk_date]['name'].tolist()
+                        new_records = []
+                        skipped_students = []
+
+                        # Add present students
+                        for student in present_students:
+                            if student not in existing_records:
+                                new_records.append({
+                                    'name': student,
+                                    'date': bulk_date,
+                                    'status': 'Present',
+                                    'class_type': class_type,
+                                    'event': selected_event if class_type == "Event/Competition" else None
+                                })
+                            else:
+                                skipped_students.append(student)
+
+                        # Add absent students
+                        for student in absent_students:
+                            if student not in existing_records:
+                                new_records.append({
+                                    'name': student,
+                                    'date': bulk_date,
+                                    'status': 'Absent',
+                                    'class_type': class_type,
+                                    'event': selected_event if class_type == "Event/Competition" else None
+                                })
+                            else:
+                                skipped_students.append(student)
+
+                        if new_records:
+                            #df = pd.concat([df, pd.DataFrame(new_records)], ignore_index=True)
+                            save_attendance(pd.DataFrame(new_records), is_edit_mode=False)
+                            st.success(f"Bulk attendance marked for {len(new_records)} students on {bulk_date}")
+
+                            # Show summary
+                            st.write("Summary:")
+                            st.write(f"Date: {bulk_date}")
+                            st.write(f"Present: {len([r for r in new_records if r['status'] == 'Present'])} students")
+                            st.write(f"Absent: {len([r for r in new_records if r['status'] == 'Absent'])} students")
+
+                            # Show detailed lists
+                            col3, col4 = st.columns(2)
+                            with col3:
+                                if present_students:
+                                    st.write("Present Students:", ", ".join([s for s in present_students if s not in skipped_students]))
+                            with col4:
+                                if absent_students:
+                                    st.write("Absent Students:", ", ".join([s for s in absent_students if s not in skipped_students]))
+
+                            # Show skipped students if any
+                            if skipped_students:
+                                st.warning(f"Skipped {len(skipped_students)} students (attendance already marked):")
+                                st.write(", ".join(skipped_students))
+                        else:
+                            st.warning("Attendance already marked for all selected students on this date")
+                    else:
+                        st.warning("Please select at least one student")
+            else:
+                st.info("No students available. Please add students first.")
 
     with tab2:
         st.subheader("Mark/Edit Past Attendance")
@@ -374,28 +505,22 @@ if st.session_state.is_admin:
     
         if st.button("Mark/Update Attendance"):
             if student_name != 'No students yet':
-                # Check if attendance exists for selected date
-                mask = (df['name'] == student_name) & (df['date'] == selected_date)
-                if not df.empty and len(df[mask]) > 0:
-                    # Update existing record
-                    df.loc[mask, 'status'] = status
-                    df.loc[mask, 'class_type'] = class_type
-                    if class_type == "Event/Competition":
-                        df.loc[mask, 'event'] = selected_event
-                    df.to_csv(DATA_FILE, index=False)
-                    st.success(f"Attendance updated for {student_name} on {selected_date}")
+                new_data = {
+                    'name': student_name,
+                    'date': selected_date,
+                    'status': status,
+                    'class_type': class_type,
+                    'event': selected_event if class_type == "Event/Competition" else None
+                }
+
+                # Create a single-row DataFrame for the new/updated record
+                new_df = pd.DataFrame([new_data])
+
+                # Always use is_edit_mode=True since this is in the edit tab
+                if save_attendance(new_df, is_edit_mode=True):
+                    st.success(f"Attendance {'updated' if check_existing_attendance(student_name, selected_date) else 'marked'} for {student_name} on {selected_date}")
                 else:
-                    # Add new record
-                    new_data = {
-                        'name': student_name,
-                        'date': selected_date,
-                        'status': status,
-                        'class_type': class_type,
-                        'event': selected_event if class_type == "Event/Competition" else None
-                    }
-                    df = pd.concat([df, pd.DataFrame([new_data])], ignore_index=True)
-                    df.to_csv(DATA_FILE, index=False)
-                    st.success(f"Attendance marked for {student_name} on {selected_date}")
+                    st.error("Failed to save attendance")
 
         # Show existing attendance for selected date
         st.divider()
@@ -417,6 +542,57 @@ if st.session_state.is_admin:
         else:
             st.info("No records found for selected date")
         pass
+
+    #In tab6:
+    with tab6:
+        st.subheader("Manage Members")
+        
+        # Add new member
+        with st.expander("Add New Member"):
+            new_username = st.text_input("Username")
+            new_password = st.text_input("Password", type="password")
+            if st.button("Add Member"):
+                if new_username and new_password:
+                    if add_member_credentials(new_username, new_password):
+                        st.success(f"Added member: {new_username}")
+                else:
+                    st.error("Please provide both username and password")
+        
+        # View/manage existing members
+        response = supabase.table('member_credentials').select('*').execute()
+        if response.data:
+            members_df = pd.DataFrame(response.data)
+
+            # Create a styled dataframe
+            styled_df = members_df[['username', 'is_active', 'created_at']].copy()
+            # Convert is_active to colored text
+            styled_df['is_active'] = styled_df['is_active'].apply(
+                lambda x: f"🟢 Active" if x else f"🔴 Inactive"
+            )
+        
+            # Rename columns for better display
+            styled_df.columns = ['Username', 'Status', 'Created At']
+
+            # Display the styled dataframe
+            st.dataframe(
+                styled_df,
+                column_config={
+                    "Status": st.column_config.TextColumn(
+                        "Status",
+                        help="Member account status",
+                        width="medium"
+                    )
+                }
+            )
+            
+            # Manage member status
+            member_to_update = st.selectbox("Select member to update", members_df['username'])
+            current_status = members_df[members_df['username'] == member_to_update]['is_active'].iloc[0]
+            new_status = st.checkbox("Is Active", value=current_status)
+            if st.button("Update Status"):
+                if update_member_status(member_to_update, new_status):
+                    st.success(f"Updated status for {member_to_update}")
+                    st.rerun()
 
 # View Records tab (available to all)
 with tab3:
@@ -470,7 +646,7 @@ with tab3:
                                 'contact': contact
                             }])
                             student_info_df = pd.concat([student_info_df, new_bio], ignore_index=True)
-                            student_info_df.to_csv(STUDENT_INFO_FILE, index=False)
+                            save_student_info(student_info_df)
                             st.success("Bio added successfully!")
                             st.rerun()
             
@@ -591,12 +767,6 @@ with tab4:
         # Combined stats
         combined_stats = calculate_stats(df, 'Combined')
 
-        # Display statistics
-        # st.write(f"Total Class Days: {total_days}")
-        # st.write(f"Regular Classes: {total_regular_days}")
-        # st.write(f"Special Classes: {total_special_days}")
-        # st.write(f"Event Classes: {total_event_days}")
-
         # Create a summary metrics display
         col1, col2, col3, col4 = st.columns(4)
         with col1:
@@ -699,9 +869,3 @@ with tab5:
     else:
         st.info("No Events records to show statistics")
     pass
-
-# # Update viewer count periodically
-# if st.session_state.current_user and not st.session_state.current_user.startswith('admin:'):
-#     viewer_name = st.session_state.current_user.split(':')[1]
-#     if viewer_name not in st.session_state.logged_in_users:
-#         st.session_state.logged_in_users.add(viewer_name)
