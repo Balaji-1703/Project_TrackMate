@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import os
 import supabase
+import plotly.express as px
 from datetime import datetime, date
 from supabase import create_client, Client
 import time
@@ -119,18 +120,39 @@ def set_background():
         
         /* Stats Card styling */
         .stats-card {
-            background: rgba(255, 255, 255, 0.95);
+            background: linear-gradient(135deg, rgba(255, 255, 255, 0.95) 0%, rgba(255, 255, 255, 0.8) 100%);
             border-radius: 10px;
             padding: 1.5rem;
             margin: 1rem 0;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-            border-left: 5px solid #4CAF50;
-            transition: transform 0.2s ease-in-out;
+            box-shadow: 
+                0 4px 6px rgba(0, 0, 0, 0.1),
+                inset 0 -4px 8px rgba(0, 0, 0, 0.05),
+                inset 0 2px 4px rgba(255, 255, 255, 0.9);
+            transition: all 0.3s ease-in-out;
+            backdrop-filter: blur(10px);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .stats-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 50%;
+            background: linear-gradient(180deg, 
+                rgba(255, 255, 255, 0.3) 0%, 
+                rgba(255, 255, 255, 0.1) 100%);
+            border-radius: 10px 10px 0 0;
         }
 
         .stats-card:hover {
             transform: translateY(-5px);
-            box-shadow: 0 6px 12px rgba(0, 0, 0, 0.15);
+            box-shadow: 
+                0 6px 12px rgba(0, 0, 0, 0.15),
+                inset 0 -4px 8px rgba(0, 0, 0, 0.08),
+                inset 0 2px 4px rgba(255, 255, 255, 0.9);
         }
 
         .stats-card h4 {
@@ -138,41 +160,52 @@ def set_background():
             margin-bottom: 1rem;
             font-size: 1.2rem;
             font-weight: 600;
+            position: relative;
+            z-index: 1;
         }
 
         .stats-card .metric-value {
+            color: #1E1E1E;
             font-size: 2rem;
             font-weight: bold;
-            color: #4CAF50;
+            position: relative;
+            z-index: 1;
+            text-shadow: 1px 1px 2px rgba(255, 255, 255, 0.5);
         }
 
         .stats-card .metric-label {
             font-size: 0.9rem;
-            color: #666;
+            color: #1E1E1E;
             margin-top: 0.5rem;
+            position: relative;
+            z-index: 1;
         }
 
         /* Different colors for different stat types */
         .regular-card {
-            border-left-color: #2196F3;
+            border-left-color: #95B8D1;
+            background: linear-gradient(135deg, #E8F4F8 0%, #4fbcf0 100%);
         }
         .regular-card .metric-value {
-            color: #2196F3;
+            color: #5B8BA0;
         }
 
         .special-card {
-            border-left-color: #9C27B0;
+            border-left-color: #E8B4BC;
+            background: linear-gradient(135deg, #FFF0F3 0%, #f78198 100%);
         }
         .special-card .metric-value {
-            color: #9C27B0;
+            color: #D16277;
         }
 
         .combined-card {
-            border-left-color: #FF9800;
+            border-left-color: #B4D6B4;
+            background: linear-gradient(135deg, #F0F7F0 0%, #68d468 100%);
         }
         .combined-card .metric-value {
-            color: #FF9800;
+            color: #5E8C5E;
         }
+
 
         </style>
         
@@ -532,7 +565,48 @@ else:
         st.session_state.current_user = None
         st.session_state.is_admin = False
         st.rerun()
-    
+
+    # Add after the logout button in the sidebar section, before loading data
+if st.session_state.current_user:
+    st.sidebar.divider()
+    with st.sidebar.expander("🔑 Change Password"):
+        current_password = st.text_input("Current Password", type="password")
+        new_password = st.text_input("New Password", type="password")
+        confirm_password = st.text_input("Confirm New Password", type="password")
+        
+        if st.button("Update Password"):
+            try:
+                # Get current user's credentials
+                username = st.session_state.current_user.split(':')[1]
+                
+                # Verify current password
+                response = supabase.table('member_credentials')\
+                    .select('*')\
+                    .eq('username', username)\
+                    .eq('password', current_password)\
+                    .execute()
+                
+                if len(response.data) > 0:
+                    if new_password == confirm_password:
+                        if new_password != current_password:
+                            # Update password
+                            supabase.table('member_credentials')\
+                                .update({'password': new_password})\
+                                .eq('username', username)\
+                                .execute()
+                            
+                            st.sidebar.success("Password updated successfully!")
+                            time.sleep(2)
+                            st.rerun()
+                        else:
+                            st.sidebar.error("New password must be different from current password")
+                    else:
+                        st.sidebar.error("New passwords don't match")
+                else:
+                    st.sidebar.error("Current password is incorrect")
+            except Exception as e:
+                st.sidebar.error(f"Error updating password: {str(e)}")
+
     # Show main title
     st.title("Zoho Dance Crew Attendance Register")
 
@@ -925,8 +999,7 @@ with tab3:
             # Calculate statistics
             total_days = len(filtered_df['date'].unique())
             
-            if search_name:
-
+            if search_name != 'View All':
                 # Single student statistics
                 student_stats = filtered_df[
                     filtered_df['name'].str.lower() == search_name.lower()
@@ -1026,12 +1099,6 @@ with tab3:
                         regular_total = len(regular_matches)
                         regular_present = len(regular_matches[regular_matches['status'] == 'Present'])
                         regular_percentage = (regular_present / regular_total * 100) if regular_total > 0 else 0
-                        # loc_col1, loc_col2 = st.columns(2)
-                        # with loc_col1:
-                        #     st.metric("Total", regular_total)
-                        # with loc_col2:
-                        #     st.metric("Present", regular_present)
-                        # st.metric("Percentage", f"{regular_percentage:.1f}%")
 
                         # Regular Classes Card
                         st.markdown("""
@@ -1039,7 +1106,7 @@ with tab3:
                                 <h4>Regular Classes</h4>
                                 <div class="metric-value">{:.1f}%</div>
                                 <div class="metric-label">Attendance Rate</div>
-                                <div style="margin-top: 1rem;">
+                                <div style="margin-top: 1rem; color: #1E1E1E;">
                                     <strong>Total:</strong> {} | <strong>Present:</strong> {}
                                 </div>
                             </div>
@@ -1049,12 +1116,6 @@ with tab3:
                         special_total = len(special_matches)
                         special_present = len(special_matches[special_matches['status'] == 'Present'])
                         special_percentage = (special_present / special_total * 100) if special_total > 0 else 0
-                        # loc_col1, loc_col2 = st.columns(2)
-                        # with loc_col1:
-                        #     st.metric("Total", special_total)
-                        # with loc_col2:
-                        #     st.metric("Present", special_present)
-                        # st.metric("Percentage", f"{special_percentage:.1f}%")
 
                         # Special Classes Card
                         st.markdown("""
@@ -1062,7 +1123,7 @@ with tab3:
                                 <h4>Special Classes</h4>
                                 <div class="metric-value">{:.1f}%</div>
                                 <div class="metric-label">Attendance Rate</div>
-                                <div style="margin-top: 1rem;">
+                                <div style="margin-top: 1rem; color: #1E1E1E;">
                                     <strong>Total:</strong> {} | <strong>Present:</strong> {}
                                 </div>
                             </div>
@@ -1072,12 +1133,6 @@ with tab3:
                         total_classes = len(student_stats)
                         total_present = len(student_stats[student_stats['status'] == 'Present'])
                         total_percentage = (total_present / total_classes * 100) if total_classes > 0 else 0
-                        # loc_col1, loc_col2 = st.columns(2)
-                        # with loc_col1:
-                        #     st.metric("Total Classes", total_classes)
-                        # with loc_col2:
-                        #     st.metric("Present Days", total_present)
-                        # st.metric("Percentage", f"{total_percentage:.1f}%")
 
                         # Combined Stats Card
                         st.markdown("""
@@ -1085,7 +1140,7 @@ with tab3:
                                 <h4>Combined Statistics</h4>
                                 <div class="metric-value">{:.1f}%</div>
                                 <div class="metric-label">Overall Attendance Rate</div>
-                                <div style="margin-top: 1rem;">
+                                <div style="margin-top: 1rem; color: #1E1E1E;">
                                     <strong>Total Classes:</strong> {} | <strong>Present Days:</strong> {}
                                 </div>
                             </div>
@@ -1124,13 +1179,81 @@ with tab3:
                 
                 # Display overall statistics
                 st.dataframe(all_stats)
-                
-                # Show attendance trend for all
-                st.subheader("Overall Attendance Trend")
-                daily_attendance = filtered_df.groupby('date').agg({
-                    'status': lambda x: (x == 'Present').mean() * 100
-                }).reset_index()
-                st.line_chart(daily_attendance.set_index('date'))
+
+                # Add daily attendance bar graph
+                st.subheader("Daily Attendance Overview")
+
+                # Calculate daily attendance counts
+                daily_attendance = filtered_df.groupby(['date', 'status']).size().unstack(fill_value=0)
+                if 'Present' not in daily_attendance.columns:
+                    daily_attendance['Present'] = 0
+                if 'Absent' not in daily_attendance.columns:
+                    daily_attendance['Absent'] = 0
+
+                # Prepare data for plotting
+                plot_df = pd.DataFrame({
+                    'Date': daily_attendance.index,
+                    'Present': daily_attendance['Present'],
+                    'Total': daily_attendance['Present'] + daily_attendance['Absent']
+                })
+
+                # Create bar chart
+                fig = px.bar(
+                    plot_df,
+                    x='Date',
+                    y=['Present', 'Total'],
+                    title='Daily Attendance Count',
+                    labels={'value': 'Number of Students', 'Date': 'Date', 'variable': 'Category'},
+                    barmode='group',
+                    color_discrete_map={'Present': '#4CAF50', 'Total': '#90CAF9'}
+                )
+
+                # Customize layout
+                fig.update_layout(
+                    xaxis_tickangle=-45,
+                    legend_title_text='',
+                    hovermode='x unified',
+                    height=400,
+                    showlegend=True
+                )
+
+                # Add hover template
+                fig.update_traces(
+                    hovertemplate="<br>".join([
+                        "%{data.name} Members: %{y}",
+                        "<extra></extra>"
+                    ])
+                )
+
+                # Display the plot
+                st.plotly_chart(fig, use_container_width=True)
+
+                # Add percentage line chart
+                attendance_percentage = (plot_df['Present'] / plot_df['Total'] * 100).round(2)
+
+                # Create percentage line chart
+                fig2 = px.line(
+                    x=plot_df['Date'],
+                    y=attendance_percentage,
+                    title='Daily Attendance Percentage',
+                    labels={'x': 'Date', 'y': 'Attendance %'},
+                    line_shape='linear'
+                )
+
+                # Customize layout
+                fig2.update_layout(
+                    xaxis_tickangle=-45,
+                    hovermode='x unified',
+                    height=400,
+                    showlegend=False,
+                    yaxis_range=[0, 100]
+                )
+
+                # Add percentage sign to y-axis
+                fig2.update_layout(yaxis_ticksuffix='%')
+
+                # Display the plot
+                st.plotly_chart(fig2, use_container_width=True)
             
             # Show detailed records
             st.subheader("Detailed Records")
@@ -1201,7 +1324,7 @@ with tab4:
             st.metric("Events", total_event_days)
 
         # Create tabs for different statistics views
-        stat_tab1, stat_tab2, stat_tab3, stat_tab4 = st.tabs(["Regular Classes", "Special Classes", "Events", "Combined"])
+        stat_tab1, stat_tab2, stat_tab3, stat_tab4 = st.tabs(["Regular Classes", "Special Classes", "Events", "Combined Feedback"])
 
         with stat_tab1:
             st.subheader("Regular Class Statistics")
@@ -1241,25 +1364,36 @@ with tab4:
         with stat_tab4:
             st.subheader("Combined Statistics")
             if not combined_stats.empty:
-                st.dataframe(combined_stats)
-                st.bar_chart(combined_stats.set_index('name')['attendance_percentage'])
-            else:
-                st.info("No attendance records found")
-
-            st.subheader("Feedback Summary")
-
-            if not combined_stats.empty:
-                for _, row in combined_stats.iterrows():
-                    with st.container():
-                        col1, col2 = st.columns([3, 1])
-                        with col1:
-                            st.write(f"**{row['name']}**")
-                            st.progress(row['attendance_percentage'] / 100)
-                        with col2:
-                            st.markdown(
-                                get_attendance_emoji(row['attendance_percentage']),
-                                unsafe_allow_html=True
-                            )
+                # Calculate total classes held for each class type
+                total_regular = len(df[df['class_type'] == 'Regular']['date'].unique())
+                total_special = len(df[df['class_type'] == 'Special']['date'].unique())
+                total_events = len(df[df['class_type'] == 'Event/Competition']['date'].unique())
+                total_classes_held = total_regular + total_special + total_events
+        
+                # Add stars calculation
+                combined_stats['Stars'] = combined_stats.apply(
+                    lambda x: f"{'⭐' * int((x['classes_present'] / total_classes_held) * 5)}" + 
+                             f" ({((x['classes_present'] / total_classes_held) * 100):.1f}%)", 
+                    axis=1
+                )
+        
+                # Display the updated dataframe with custom formatting
+                st.dataframe(
+                    combined_stats,
+                    column_config={
+                        "name": "Name",
+                        "total_classes": "Committed Classes",
+                        "classes_present": "Present",
+                        "attendance_percentage": st.column_config.NumberColumn(
+                            "Personal Attendance %",
+                            format="%.1f%%"
+                        ),
+                        "Stars": st.column_config.TextColumn(
+                            "Overall Attendance Rating",
+                            help="Stars based on total classes held"
+                        )
+                    }
+                )
 
     else:
         st.info("No attendance records to show statistics")
