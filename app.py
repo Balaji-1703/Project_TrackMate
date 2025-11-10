@@ -325,7 +325,8 @@ def save_attendance(df, is_edit_mode=False):
                             .update({
                                 'status': record['status'],
                                 'class_type': record['class_type'],
-                                'event': record['event']
+                                'event': record['event'],
+                                'instructor': record.get('instructor', [])
                             })\
                             .eq('name', record['name'])\
                             .eq('date', record['date'])\
@@ -1016,17 +1017,110 @@ if st.session_state.user_role == 'member':
                 attendance_history = student_stats.sort_values('date')
                 # Create attendance plot data
                 plot_data = pd.DataFrame({
-                    'date': attendance_history['date'],
-                    'attendance': (attendance_history['status'] == 'Present').astype(int)
-                }).set_index('date')
-                # Display the line chart with dates
-                st.line_chart(plot_data, width='stretch')
-                # Add legend
+                    'Date': attendance_history['date'],
+                    'Status': attendance_history['status'],
+                    'Attendance': (attendance_history['status'] == 'Present').astype(int)
+                })
+
+                # Create line chart with plotly
+                fig = px.line(
+                    plot_data,
+                    x='Date',
+                    y='Attendance',
+                    title='📈 Personal Attendance Trend',
+                    labels={'Attendance': 'Attendance Status', 'Date': 'Date'},
+                    line_shape='linear'
+                )
+
+                # Add markers for better visibility
+                fig.update_traces(
+                    mode='lines+markers',
+                    line=dict(color='#4CAF50', width=3),
+                    marker=dict(size=8, color='#2E7D32'),
+                    hovertemplate="<br>".join([
+                        "Date: %{x}",
+                        "Status: %{customdata[0]}",
+                        "<extra></extra>"
+                    ]),
+                    customdata=plot_data[['Status']]
+                )
+
+                # Customize layout for aesthetics and restrict interaction
+                fig.update_layout(
+                    xaxis=dict(
+                        fixedrange=True,  # Disable x-axis zoom/pan
+                        tickangle=-45,
+                        automargin=True,
+                        showgrid=True,
+                        gridcolor='rgba(128,128,128,0.2)'
+                    ),
+                    yaxis=dict(
+                        fixedrange=True,  # Disable y-axis zoom/pan
+                        range=[-0.1, 1.1],  # Fixed range for 0 and 1
+                        tickvals=[0, 1],
+                        ticktext=['❌ Absent', '✅ Present'],
+                        showgrid=True,
+                        gridcolor='rgba(128,128,128,0.2)'
+                    ),
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    height=400,
+                    showlegend=False,
+                    hovermode='x unified',
+                    margin=dict(t=60, b=60, l=60, r=40)
+                )
+
+                # Add color-coded background zones
+                fig.add_hline(
+                    y=0.5, 
+                    line_dash="dot", 
+                    line_color="gray", 
+                    opacity=0.5,
+                    annotation_text=search_name
+                )
+
+                # Display the plot with restricted toolbar
+                st.plotly_chart(
+                    fig, 
+                    width='stretch',
+                    config={
+                        'displayModeBar': True,
+                        'displaylogo': False,
+                        'modeBarButtonsToRemove': [
+                            'zoom', 'pan', 'select', 'lasso2d', 
+                            'zoomIn', 'zoomOut', 'autoScale', 'resetScale'
+                        ],
+                        'modeBarButtonsToAdd': ['fullscreen']
+                    }
+                )
+
+                # Enhanced legend with styling
                 st.markdown("""
-                **Legend:**
-                - 1: Present
-                - 0: Absent
-                """)
+                <div style='
+                    background: linear-gradient(135deg, rgba(255, 255, 255, 0.1) 0%, rgba(255, 255, 255, 0.05) 100%);
+                    border-radius: 10px;
+                    padding: 1rem;
+                    margin: 1rem 0;
+                    border-left: 4px solid #4CAF50;
+                '>
+                    <h4 style='color: #1E1E1E; margin-bottom: 0.5rem;'>📊 Chart Legend:</h4>
+                    <div style='display: flex; gap: 2rem; align-items: center;'>
+                        <div style='display: flex; align-items: center; gap: 0.5rem;'>
+                            <div style='width: 20px; height: 3px; background-color: #4CAF50; border-radius: 2px;'></div>
+                            <span style='color: #1E1E1E; font-weight: 500;'>Attendance Timeline</span>
+                        </div>
+                        <div style='display: flex; align-items: center; gap: 0.5rem;'>
+                            <span style='color: #2E7D32; font-size: 1.2em;'>✅</span>
+                            <span style='color: #1E1E1E;'>Present</span>
+                        </div>
+                        <div style='display: flex; align-items: center; gap: 0.5rem;'>
+                            <span style='color: #C62828; font-size: 1.2em;'>❌</span>
+                            <span style='color: #1E1E1E;'>Absent</span>
+                        </div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
             # Show detailed records
             st.subheader("Detailed Records")
             st.dataframe(filtered_df)
@@ -1058,14 +1152,14 @@ else:
 
         # Define available tabs based on role
         available_tabs = ["Mark Attendance", "Mark/Edit Past Attendance", 
-                             "View Records", "Statistics", "Events", "Manage Members"]
+                             "View Records", "Statistics", "Events", "Manage Members", "Instructors"]
 
         tabs = st.tabs(available_tabs)
 
     # Then access each tab using its index from the tabs list
     for i, tab_name in enumerate(available_tabs):
         with tabs[i]:
-            if tab_name == "Mark Attendance" and st.session_state.user_role in ['master_admin', 'super_admin', 'admin']:
+            if tab_name == "Mark Attendance":
                 # Get list of members from member_credentials
                 response = supabase.table('member_credentials')\
                     .select('username')\
@@ -1176,6 +1270,10 @@ else:
 
                         absent_students = [name for name in existing_names if name not in present_students]
 
+                        instructors_options = [name for name in existing_names if name in present_students]
+
+                        instructors = st.multiselect("Instructor (who took the class)", options=instructors_options, default=[], key="attendance_instructor")
+
                         # Bulk mark attendance button
                         if st.button("Mark Bulk Attendance"):
                             if present_students or absent_students:
@@ -1192,7 +1290,8 @@ else:
                                             'date': bulk_date,
                                             'status': 'Present',
                                             'class_type': class_type,
-                                            'event': selected_event if class_type == "Event/Competition" else None
+                                            'event': selected_event if class_type == "Event/Competition" else None,
+                                            'instructor': instructors or []
                                         })
                                     else:
                                         skipped_students.append(student)
@@ -1205,7 +1304,8 @@ else:
                                             'date': bulk_date,
                                             'status': 'Absent',
                                             'class_type': class_type,
-                                            'event': selected_event if class_type == "Event/Competition" else None
+                                            'event': selected_event if class_type == "Event/Competition" else None,
+                                            'instructor': instructors or []
                                         })
                                     else:
                                         skipped_students.append(student)
@@ -1305,6 +1405,9 @@ else:
                         default=default_present
                     )
 
+                    instructors_options = [name for name in existing_names if name in editable_marked_present_members]
+                    instructors = st.multiselect("Instructor (who took the class)", options=instructors_options, default=[], key="edit_attendance_instructor")
+
                     editable_marked_absent_members = [name for name in existing_names if name not in editable_marked_present_members]
                     st.info(f"Absent Members: {', '.join(editable_marked_absent_members) if editable_marked_absent_members else 'None'}")
 
@@ -1321,7 +1424,8 @@ else:
                                     'date': selected_date,
                                     'status': 'Present',
                                     'class_type': class_type,
-                                    'event': event_name if class_type == "Event/Competition" else None
+                                    'event': event_name if class_type == "Event/Competition" else None,
+                                    'instructor': instructors or []
                                 })
                             else:
                                 updated_records.append({
@@ -1329,7 +1433,8 @@ else:
                                     'date': selected_date,
                                     'status': 'Present',
                                     'class_type': class_type,
-                                    'event': event_name if class_type == "Event/Competition" else None
+                                    'event': event_name if class_type == "Event/Competition" else None,
+                                    'instructor': instructors or []
                                 })
 
                         # Add present students
@@ -1341,7 +1446,8 @@ else:
                                     'date': selected_date,
                                     'status': 'Absent',
                                     'class_type': class_type,
-                                    'event': event_name if class_type == "Event/Competition" else None
+                                    'event': event_name if class_type == "Event/Competition" else None,
+                                    'instructor': instructors or []
                                 })
                             else:
                                 updated_records.append({
@@ -1349,7 +1455,8 @@ else:
                                     'date': selected_date,
                                     'status': 'Absent',
                                     'class_type': class_type,
-                                    'event': event_name if class_type == "Event/Competition" else None
+                                    'event': event_name if class_type == "Event/Competition" else None,
+                                    'instructor': instructors or []
                                 })
 
                         if updated_records:
@@ -1632,19 +1739,109 @@ else:
                                 attendance_history = student_stats.sort_values('date')
                                 # Create attendance plot data
                                 plot_data = pd.DataFrame({
-                                    'date': attendance_history['date'],
-                                    'attendance': (attendance_history['status'] == 'Present').astype(int)
-                                }).set_index('date')
+                                    'Date': attendance_history['date'],
+                                    'Status': attendance_history['status'],
+                                    'Attendance': (attendance_history['status'] == 'Present').astype(int)
+                                })
 
-                                # Display the line chart with dates
-                                st.line_chart(plot_data, width='stretch')
+                                # Create line chart with plotly
+                                fig = px.line(
+                                    plot_data,
+                                    x='Date',
+                                    y='Attendance',
+                                    title='📈 Personal Attendance Trend',
+                                    labels={'Attendance': 'Attendance Status', 'Date': 'Date'},
+                                    line_shape='linear'
+                                )
 
-                                # Add legend
+                                # Add markers for better visibility
+                                fig.update_traces(
+                                    mode='lines+markers',
+                                    line=dict(color='#4CAF50', width=3),
+                                    marker=dict(size=8, color='#2E7D32'),
+                                    hovertemplate="<br>".join([
+                                        "Date: %{x}",
+                                        "Status: %{customdata[0]}",
+                                        "<extra></extra>"
+                                    ]),
+                                    customdata=plot_data[['Status']]
+                                )
+
+                                # Customize layout for aesthetics and restrict interaction
+                                fig.update_layout(
+                                    xaxis=dict(
+                                        fixedrange=True,  # Disable x-axis zoom/pan
+                                        tickangle=-45,
+                                        automargin=True,
+                                        showgrid=True,
+                                        gridcolor='rgba(128,128,128,0.2)'
+                                    ),
+                                    yaxis=dict(
+                                        fixedrange=True,  # Disable y-axis zoom/pan
+                                        range=[-0.1, 1.1],  # Fixed range for 0 and 1
+                                        tickvals=[0, 1],
+                                        ticktext=['❌ Absent', '✅ Present'],
+                                        showgrid=True,
+                                        gridcolor='rgba(128,128,128,0.2)'
+                                    ),
+                                    plot_bgcolor='rgba(0,0,0,0)',
+                                    paper_bgcolor='rgba(0,0,0,0)',
+                                    height=400,
+                                    showlegend=False,
+                                    hovermode='x unified',
+                                    margin=dict(t=60, b=60, l=60, r=40)
+                                )
+
+                                # Add color-coded background zones
+                                fig.add_hline(
+                                    y=0.5, 
+                                    line_dash="dot", 
+                                    line_color="gray", 
+                                    opacity=0.5,
+                                    annotation_text=search_name
+                                )
+
+                                # Display the plot with restricted toolbar
+                                st.plotly_chart(
+                                    fig, 
+                                    width='stretch',
+                                    config={
+                                        'displayModeBar': True,
+                                        'displaylogo': False,
+                                        'modeBarButtonsToRemove': [
+                                            'zoom', 'pan', 'select', 'lasso2d', 
+                                            'zoomIn', 'zoomOut', 'autoScale', 'resetScale'
+                                        ],
+                                        'modeBarButtonsToAdd': ['fullscreen']
+                                    }
+                                )
+
+                                # Enhanced legend with styling
                                 st.markdown("""
-                                **Legend:**
-                                - 1: Present
-                                - 0: Absent
-                                """)
+                                <div style='
+                                    background: linear-gradient(135deg, rgba(255, 255, 255, 0.1) 0%, rgba(255, 255, 255, 0.05) 100%);
+                                    border-radius: 10px;
+                                    padding: 1rem;
+                                    margin: 1rem 0;
+                                    border-left: 4px solid #4CAF50;
+                                '>
+                                    <h4 style='color: #1E1E1E; margin-bottom: 0.5rem;'>📊 Chart Legend:</h4>
+                                    <div style='display: flex; gap: 2rem; align-items: center;'>
+                                        <div style='display: flex; align-items: center; gap: 0.5rem;'>
+                                            <div style='width: 20px; height: 3px; background-color: #4CAF50; border-radius: 2px;'></div>
+                                            <span style='color: #1E1E1E; font-weight: 500;'>Attendance Timeline</span>
+                                        </div>
+                                        <div style='display: flex; align-items: center; gap: 0.5rem;'>
+                                            <span style='color: #2E7D32; font-size: 1.2em;'>✅</span>
+                                            <span style='color: #1E1E1E;'>Present</span>
+                                        </div>
+                                        <div style='display: flex; align-items: center; gap: 0.5rem;'>
+                                            <span style='color: #C62828; font-size: 1.2em;'>❌</span>
+                                            <span style='color: #1E1E1E;'>Absent</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                """, unsafe_allow_html=True)
                         else:
                             # All students statistics
                             st.subheader("Overall Statistics")
@@ -1715,7 +1912,14 @@ else:
 
                             # Customize layout
                             fig.update_layout(
-                                xaxis_tickangle=-45,
+                                xaxis=dict(
+                                    fixedrange=True,  # Disable x-axis zoom/pan
+                                    tickangle=-45,
+                                    automargin=True
+                                ),
+                                yaxis=dict(
+                                    fixedrange=True   # Disable y-axis zoom/pan
+                                ),
                                 legend_title_text='',
                                 hovermode='x unified',
                                 height=400,
@@ -1730,8 +1934,20 @@ else:
                                 ])
                             )
 
-                            # Display the plot
-                            st.plotly_chart(fig, width='stretch')
+                            # Display the plot with restricted toolbar
+                            st.plotly_chart(
+                                fig, 
+                                width='stretch',
+                                config={
+                                    'displayModeBar': True,
+                                    'displaylogo': False,
+                                    'modeBarButtonsToRemove': [
+                                        'zoom', 'pan', 'select', 'lasso2d', 
+                                        'zoomIn', 'zoomOut', 'autoScale', 'resetScale'
+                                    ],
+                                    'modeBarButtonsToAdd': ['fullscreen']
+                                }
+                            )
 
                             # Add percentage line chart
                             attendance_percentage = (plot_df['Present'] / plot_df['Total'] * 100).round(2)
@@ -1747,18 +1963,38 @@ else:
 
                             # Customize layout
                             fig2.update_layout(
-                                xaxis_tickangle=-45,
+                                xaxis=dict(
+                                    fixedrange=True,  # Disable x-axis zoom/pan
+                                    tickangle=-45,
+                                    automargin=True
+                                ),
+                                yaxis=dict(
+                                    fixedrange=True,  # Disable y-axis zoom/pan
+                                    range=[0, 100],
+                                    ticksuffix='%'
+                                ),
                                 hovermode='x unified',
                                 height=400,
-                                showlegend=False,
-                                yaxis_range=[0, 100]
+                                showlegend=False
                             )
 
                             # Add percentage sign to y-axis
                             fig2.update_layout(yaxis_ticksuffix='%')
 
-                            # Display the plot
-                            st.plotly_chart(fig2, width='stretch')
+                            # Display the plot with restricted toolbar
+                            st.plotly_chart(
+                                fig2, 
+                                width='stretch',
+                                config={
+                                    'displayModeBar': True,
+                                    'displaylogo': False,
+                                    'modeBarButtonsToRemove': [
+                                        'zoom', 'pan', 'select', 'lasso2d', 
+                                        'zoomIn', 'zoomOut', 'autoScale', 'resetScale'
+                                    ],
+                                    'modeBarButtonsToAdd': ['fullscreen']
+                                }
+                            )
 
                         # Show detailed records
                         st.subheader("Detailed Records")
@@ -3014,3 +3250,247 @@ else:
                                 st.success(f"Updated status for {member_to_update}")
                                 time.sleep(2)
                                 st.rerun()
+    
+            # elif tab_name == "Instructors":
+            #     st.subheader("Instructor Class Summary")
+            #     if not df.empty and 'instructor' in df.columns:
+            #         instructor_stats = df.groupby('instructor').agg(
+            #             total_classes=pd.NamedAgg(column='date', aggfunc='count'),
+            #             unique_days=pd.NamedAgg(column='date', aggfunc=lambda x: len(set(x)))
+            #         ).reset_index()
+            #         instructor_stats = instructor_stats[instructor_stats['instructor'].notna()]
+            #         st.dataframe(instructor_stats.rename(columns={
+            #             'instructor': 'Instructor',
+            #             'total_classes': 'Total Classes Taken',
+            #             'unique_days': 'Unique Days'
+            #         }))
+            #     else:
+            #         st.info("No instructor data available.")
+
+            elif tab_name == "Instructors":
+                st.subheader("Instructor Class Summary")
+
+                if not df.empty and 'instructor' in df.columns:
+                    # Filter out rows where instructor is null or empty
+                    mask = df['instructor'].notna()
+                    if df['instructor'].dtype == 'object':
+                        # Check for empty lists, empty strings, etc.
+                        mask = mask & (df['instructor'].astype(str) != '[]') & (df['instructor'].astype(str) != '') & (df['instructor'].astype(str) != 'nan')
+
+                    df_with_instructors = df[mask]
+
+                    if not df_with_instructors.empty:
+                        # Handle null events by filling with 'Regular' or appropriate default
+                        df_with_instructors = df_with_instructors.copy()
+                        df_with_instructors['event'] = df_with_instructors['event'].fillna('N/A')
+
+                        # Get unique classes (one row per class)
+                        unique_classes = df_with_instructors.groupby(['date', 'class_type', 'event'])['instructor'].first().reset_index()
+
+                        if not unique_classes.empty:
+                            # Handle instructor column - convert string representation to actual list if needed
+                            def parse_instructor_field(instructor_field):
+                                if pd.isna(instructor_field):
+                                    return []
+                                if isinstance(instructor_field, list):
+                                    return instructor_field
+                                if isinstance(instructor_field, str):
+                                    # Try to parse string representation of list
+                                    if instructor_field.startswith('[') and instructor_field.endswith(']'):
+                                        try:
+                                            import ast
+                                            return ast.literal_eval(instructor_field)
+                                        except:
+                                            # Handle malformed list strings
+                                            clean_str = instructor_field.strip('[]').replace("'", "").replace('"', '')
+                                            if clean_str:
+                                                return [name.strip() for name in clean_str.split(',') if name.strip()]
+                                            return []
+                                    else:
+                                        return [instructor_field] if instructor_field else []
+                                return [str(instructor_field)]
+
+                            # Apply parsing to instructor field
+                            unique_classes['instructor_parsed'] = unique_classes['instructor'].apply(parse_instructor_field)
+
+                            # Filter out empty instructor lists
+                            unique_classes = unique_classes[unique_classes['instructor_parsed'].apply(lambda x: len(x) > 0)]
+
+                            if not unique_classes.empty:
+                                # Explode instructor arrays to get individual instructor records
+                                instructor_classes = unique_classes.explode('instructor_parsed')
+                                instructor_classes = instructor_classes[
+                                    instructor_classes['instructor_parsed'].notna() & 
+                                    (instructor_classes['instructor_parsed'] != '') &
+                                    (instructor_classes['instructor_parsed'] != 'nan')
+                                ]
+
+                                if not instructor_classes.empty:
+                                    # Calculate stats for each instructor
+                                    instructor_summary = []
+
+                                    for instructor in instructor_classes['instructor_parsed'].unique():
+                                        instructor_data = instructor_classes[instructor_classes['instructor_parsed'] == instructor]
+
+                                        # Count solo and shared classes
+                                        solo_classes = 0
+                                        shared_classes = 0
+                                        collaborators = set()
+
+                                        # Calculate average attendance percentage for instructor's classes
+                                        attendance_percentages = []
+
+                                        for _, class_record in instructor_data.iterrows():
+                                            # Find original class to count instructors
+                                            original_class = unique_classes[
+                                                (unique_classes['date'] == class_record['date']) &
+                                                (unique_classes['class_type'] == class_record['class_type']) &
+                                                (unique_classes['event'] == class_record['event'])
+                                            ].iloc[0]
+
+                                            instructor_list = original_class['instructor_parsed']
+                                            if len(instructor_list) > 1:
+                                                shared_classes += 1
+                                                # Add collaborators (excluding self)
+                                                collaborators.update([inst for inst in instructor_list if inst != instructor])
+                                            else:
+                                                solo_classes += 1
+
+                                            # Calculate attendance percentage for this specific class date
+                                            class_attendance = df_with_instructors[
+                                                (df_with_instructors['date'] == class_record['date']) &
+                                                (df_with_instructors['class_type'] == class_record['class_type']) &
+                                                (df_with_instructors['event'] == class_record['event'])
+                                            ]
+
+                                            if not class_attendance.empty:
+                                                total_members = len(class_attendance)
+                                                present_members = len(class_attendance[class_attendance['status'] == 'Present'])
+                                                class_attendance_percentage = (present_members / total_members * 100) if total_members > 0 else 0
+                                                attendance_percentages.append(class_attendance_percentage)
+
+                                        # Calculate average attendance percentage
+                                        avg_attendance = sum(attendance_percentages) / len(attendance_percentages) if attendance_percentages else 0
+
+                                        instructor_summary.append({
+                                            'Instructor': instructor,
+                                            'Total Classes': len(instructor_data),
+                                            'Solo Classes': solo_classes,
+                                            'Shared Classes': shared_classes,
+                                            'Avg Attendance %': round(avg_attendance, 1),
+                                            'Collaborators': ', '.join(sorted(collaborators)) if collaborators else 'None'
+                                        })
+
+                                    # Convert to DataFrame and sort by total classes
+                                    summary_df = pd.DataFrame(instructor_summary)
+                                    summary_df = summary_df.sort_values('Total Classes', ascending=False)
+
+                                    # Display summary table
+                                    st.dataframe(
+                                        summary_df,
+                                        column_config={
+                                            "Instructor": st.column_config.TextColumn(
+                                                "👨‍🏫 Instructor",
+                                                help="Instructor name"
+                                            ),
+                                            "Total Classes": st.column_config.NumberColumn(
+                                                "📚 Total Classes",
+                                                help="Total classes conducted"
+                                            ),
+                                            "Solo Classes": st.column_config.NumberColumn(
+                                                "🎯 Solo Classes",
+                                                help="Classes conducted alone"
+                                            ),
+                                            "Shared Classes": st.column_config.NumberColumn(
+                                                "🤝 Shared Classes",
+                                                help="Classes conducted with others"
+                                            ),
+                                            "Avg Attendance %": st.column_config.NumberColumn(
+                                                "📊 Avg Attendance %",
+                                                help="Average attendance percentage across all classes taught",
+                                                format="%.1f%%"
+                                            ),
+                                            "Collaborators": st.column_config.TextColumn(
+                                                "👥 Frequent Collaborators",
+                                                help="Instructors worked with"
+                                            )
+                                        },
+                                        hide_index=True
+                                    )
+
+                                    # Show summary metrics
+                                    st.divider()
+                                    col1, col2, col3, col4, col5 = st.columns(5)
+
+                                    with col1:
+                                        st.metric("👨‍🏫 Total Instructors", len(summary_df))
+
+                                    with col2:
+                                        total_classes = len(unique_classes)
+                                        st.metric("📚 Total Classes", total_classes)
+
+                                    with col3:
+                                        shared_count = len(unique_classes[unique_classes['instructor_parsed'].apply(
+                                            lambda x: len(x) > 1
+                                        )])
+                                        st.metric("🤝 Shared Classes", shared_count)
+
+                                    with col4:
+                                        share_percentage = (shared_count / total_classes * 100) if total_classes > 0 else 0
+                                        st.metric("📊 Collaboration Rate", f"{share_percentage:.1f}%")
+
+                                    with col5:
+                                        overall_avg_attendance = summary_df['Avg Attendance %'].mean()
+                                        st.metric("📈 Overall Avg Attendance", f"{overall_avg_attendance:.1f}%")
+
+                                    # Show detailed collaboration pairs
+                                    if shared_count > 0:
+                                        st.divider()
+                                        st.subheader("🤝 Collaboration Details")
+
+                                        # Find collaboration pairs
+                                        collaboration_pairs = []
+
+                                        for _, class_record in unique_classes.iterrows():
+                                            instructor_list = class_record['instructor_parsed']
+                                            if len(instructor_list) > 1:
+                                                instructors = sorted(instructor_list)
+                                                for i, inst1 in enumerate(instructors):
+                                                    for inst2 in instructors[i+1:]:
+                                                        collaboration_pairs.append({
+                                                            'Instructor 1': inst1,
+                                                            'Instructor 2': inst2,
+                                                            'Date': class_record['date'],
+                                                            'Class Type': class_record['class_type']
+                                                        })
+
+                                        if collaboration_pairs:
+                                            collab_df = pd.DataFrame(collaboration_pairs)
+
+                                            # Count collaborations
+                                            collab_summary = collab_df.groupby(['Instructor 1', 'Instructor 2']).size().reset_index(name='Classes Together')
+                                            collab_summary = collab_summary.sort_values('Classes Together', ascending=False)
+
+                                            st.dataframe(
+                                                collab_summary,
+                                                column_config={
+                                                    "Instructor 1": "👨‍🏫 Instructor 1",
+                                                    "Instructor 2": "👩‍🏫 Instructor 2",
+                                                    "Classes Together": st.column_config.NumberColumn(
+                                                        "🤝 Classes Together",
+                                                        help="Number of classes taught together"
+                                                    )
+                                                },
+                                                hide_index=True
+                                            )
+
+                                else:
+                                    st.info("No valid instructor data found after processing")
+                            else:
+                                st.info("No valid classes with instructor data")
+                        else:
+                            st.info("No unique classes found")
+                    else:
+                        st.info("No classes with instructors assigned")
+                else:
+                    st.info("No instructor data available")
