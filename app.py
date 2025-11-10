@@ -431,12 +431,37 @@ def load_active_users():
 
 # Modify the active users functions
 def add_active_user(username, is_admin=False):
-    timestamp = datetime.now().isoformat()
-    supabase.table('active_users').insert({
-        'username': username,
-        'is_admin': is_admin,
-        'last_active': timestamp
-    }).execute()
+    """Add or update active user"""
+    try:
+        # Check if user already exists
+        response = supabase.table('active_users')\
+            .select('*')\
+            .eq('username', username)\
+            .execute()
+        
+        timestamp = datetime.now().isoformat()
+        
+        if response.data:
+            # Update existing user
+            supabase.table('active_users')\
+                .update({
+                    'is_admin': is_admin,
+                    'last_active': timestamp
+                })\
+                .eq('username', username)\
+                .execute()
+        else:
+            # Add new user
+            supabase.table('active_users')\
+                .insert({
+                    'username': username,
+                    'is_admin': is_admin,
+                    'last_active': timestamp
+                })\
+                .execute()
+                
+    except Exception as e:
+        st.error(f"Error managing active user: {str(e)}")
 
 def remove_active_user(username):
     supabase.table('active_users').delete().eq('username', username).execute()
