@@ -10,6 +10,8 @@ import time
 import random
 from PIL import Image
 
+st.set_page_config(page_title="Zoho Dance Crew Register", page_icon="👟")
+
 def set_background():
     st.markdown(
         """
@@ -3494,3 +3496,4 @@ else:
                         st.info("No classes with instructors assigned")
                 else:
                     st.info("No instructor data available")
+
